@@ -2697,3 +2697,79 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
                 y_sim = self.accepted_y_sim_bds.value()[index]
 
         return (self.get_parameters(), y_sim, counter)
+
+
+class DAABCSMC(BaseDiscrepancy, InferenceMethod):
+    def __init__(self, model, cheap_simulator_model, distance, backend, kernel=None, seed=None):
+        self.model = model
+        self.cheap_model = cheap_simulator_model
+
+        self.distance = distance
+
+        self.backend = backend
+
+        self.accepted_parameters_manager_model = AcceptedParametersManager(self.model)
+        self.accepted_parameters_manager_cheap_model = AcceptedParametersManager(self.cheap_model)
+
+        if (kernel is None):
+            warnings.warn(
+                "No kernel has been defined. The default kernel will be used. All continuous parameters are perturbed using a multivariate normal, all discrete parameters are perturbed using a random walk.",
+                Warning)
+
+            mapping, garbage_index = self._get_mapping()
+            models = []
+            for mdl, mdl_index in mapping:
+                models.append(mdl)
+            kernel = DefaultKernel(models)
+
+        self.kernel = kernel
+
+        self.rng = np.random.RandomState(seed)
+
+        self.epsilon_1 = None
+
+        self.epsilon_2 = None
+
+
+    def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, full_output=0):
+        self.n_samples = n_samples
+        self.n_samples_per_param = n_samples_per_param
+
+        self.n_samples_total = n_samples_total
+        self.n_samples_accepted = n_samples_accepted
+
+        #NOTE EACH NODE WILL SAMPLE INDIVIDUALLY FROM PRIOR -> DO THE SAMPLING IN THE ACCEPT_PARAMETERS!
+
+
+        for aStep in range(steps):
+            # NOTE need epsilon calculation
+
+            # NOTE need calculate weight implementation
+
+            seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_total, dtype=np.uint32)
+            rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
+            index_arr = np.arange(n_samples_total)
+            rng_and_index_arr = np.column_stack((rng_arr, index_arr))
+            rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
+
+            # print("INFO: Broadcasting parameters.")
+            self.epsilon = epsilon
+            # NOTE THIS DOES THE WRONG THING: AT THE 0TH STEP, WE ONLY WANT TO GENERATE A DATA POINTS, BUT NOW WE HAVE N_TOT, WHICH IS N, WHICH WE DO NOT WANT!!
+            return_value = self.backend.map(self.accept_parameters, rng_and_index_pds)
+
+
+
+    def accept_parameters(self, rng_and_index):
+        rng = rng_and_index[0]
+        index = rng_and_index[1]
+
+        if self.accepted_parameters_manager_model.accepted_parameters_bds is None:
+            self.sample_from_prior(model=self.model, rng=rng)
+            self.sample_from_prior(model=self.cheap_model, rng=rng)
+
+            # NOTE DO WE NEED SIMULATED DATA FOR EACH MODEL??
+
+
+
+
+
