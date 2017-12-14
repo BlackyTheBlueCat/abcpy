@@ -2698,6 +2698,10 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
 
         return (self.get_parameters(), y_sim, counter)
 
+# TODO Weight calculation that uses kernels
+# TODO stratified resampling
+# TODO  updating of epsilon_1 and epsilon_2
+# TODO finish loading from journal file
 
 class DAABCSMC(BaseDiscrepancy, InferenceMethod):
     def __init__(self, model, cheap_simulator_model, distance, backend, kernel=None, seed=None):
@@ -2778,8 +2782,6 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         if accepted_parameters_tmp is not None:
             self.accepted_parameters_tmp_bds = self.backend.broadcast(accepted_parameters_tmp)
 
-    # TODO LINK WEIGHTS AND KERNEL
-    # TODO CHECK THE JOURNAL THINGS
     def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, epsilon_1_final = 0.1, epsilon_2_final = 0.1, full_output=0, journal_file=None):
         """Performs sampling.
 
@@ -2843,7 +2845,6 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
                 accepted_parameters = journal.parameters
                 accepted_weights = journal.weights
 
-            # TODO STRATIFIED RESAMPLING ACCORDING TO PAPER
 
             # If we are at the first step, we want to only sample A different parameters
             if aStep is 0:
@@ -2902,10 +2903,6 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
             accepted_weights = new_weights
 
             self._update_broadcasts(accepted_parameters_tmp=accepted_parameters)
-
-            # NOTE CHOOSE E2 BY BISECTION ST N_SAMPLE UNIQUE PARTICLES REMAIN AFTER REWEIGHTING AND RESAMPLING
-
-            # TODO bisection for E1, not quite sure how to implement
 
             seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_accepted, dtype=np.uint32)
             rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
