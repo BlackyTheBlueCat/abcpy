@@ -2701,6 +2701,24 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
 
 class DAABCSMC(BaseDiscrepancy, InferenceMethod):
     def __init__(self, model, cheap_simulator_model, distance, backend, kernel=None, seed=None):
+        """
+
+        Parameters
+        ----------
+        model: list
+            The models for which inference should be performed.
+        cheap_simulator_model: list
+            The models that approximate the real models, but are cheaper to simulate from. Note that the parameters of these models and the actual models have to be in the same order.
+        distance: abcpy.distances object
+            The distance to be used
+        backend: abcpy.backends object
+            The backend to be used.
+        kernel: abcpy.perturbationkernel object
+            The kernel to be used.
+        seed: int
+            The seed used to initialize the random number generator.
+        """
+
         self.model = model
         self.cheap_model = cheap_simulator_model
 
@@ -2708,8 +2726,7 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
 
         self.backend = backend
 
-        self.accepted_parameters_manager_model = AcceptedParametersManager(self.model)
-        self.accepted_parameters_manager_cheap_model = AcceptedParametersManager(self.cheap_model)
+        self.accepted_parameters_manager = AcceptedParametersManager(self.model)
 
         if (kernel is None):
             warnings.warn(
@@ -2730,8 +2747,65 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
 
         self.epsilon_2 = None
 
+        self.accepted_y_sim_bds = None
 
-    def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, epsilon_1_final = 0.1, epsilon_2_final = 0.1, full_output=0):
+        self.accepted_y_sim_cheap_bds = None
+
+        self.accepted_parameters_tmp_bds = None
+
+
+    def _update_broadcasts(self, accepted_y_sim=None, accepted_y_sim_cheap=None, accepted_parameters_tmp=None):
+        """Updates bds objects saved on this object.
+        Parameters
+        ----------
+        accepted_y_sim: list
+            The accepted simulations from the model.
+        accepted_y_sim_cheap: list
+            The accepted simulations from the cheap simulator.
+        accepted_parameters_tmp: numpy.ndarray
+            The accepted parameters after the first step.
+            """
+        def destroy(bc):
+            if bc != None:
+                bc.unpersist
+                # bc.destroy
+        if not accepted_y_sim is None:
+            self.accepted_y_sim_bds = self.backend.broadcast(accepted_y_sim)
+
+        if accepted_y_sim_cheap is not None:
+            self.accepted_y_sim_cheap_bds = self.backend.broadcast(accepted_y_sim_cheap)
+
+        if accepted_parameters_tmp is not None:
+            self.accepted_parameters_tmp_bds = self.backend.broadcast(accepted_parameters_tmp)
+
+    # TODO LINK WEIGHTS AND KERNEL
+    # TODO CHECK THE JOURNAL THINGS
+    def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, epsilon_1_final = 0.1, epsilon_2_final = 0.1, full_output=0, journal_file=None):
+        """Performs sampling.
+
+        Parameters
+        ----------
+        observations: list
+            Each entry corresponds to the observations of one model in self.model
+        steps: int
+            The number of steps for which should be sampled
+        n_samples: int
+            The number of samples that should be returned.
+        n_samples_per_param: int
+            The number of samples for each parameter that should be returned
+        n_samples_total: int
+            The tootal number of samples that should be drawn.
+        n_samples_accepted: int
+            The number of samples that should be accepted in the first acceptance step.
+        epsilon_1_final: float
+            The final value of epsilon_1
+        epsilon_2_final: float
+            The final value of epsilon_2
+
+        Returns
+        -------
+        abcpy.Journal object
+        """
 
         # Set parameters for the inference
         self.n_samples = n_samples
@@ -2740,12 +2814,36 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         self.n_samples_total = n_samples_total
         self.n_samples_accepted = n_samples_accepted
 
+        if(journal_file is not None):
+            journal = Journal.fromFile(journal_file)
+        else:
+            journal = Journal(full_output)
+
+            journal.configuration["type_model"] = [type(model).__name__ for model in self.model]
+            journal.configuration["type_cheap_model"] = [type(model).__name__ for model in self.cheap_model]
+            journal.configuration["type_dist_func"] = type(self.distance).__name__
+
+            journal.configuration["n_samples"] = self.n_samples
+            journal.configuration["n_samples_per_param"] = self.n_samples_per_param
+            journal.configuration["n_samples_total"] = self.n_samples_total
+            journal.configuration["n_samples_accepted"] = self.n_samples_accepted
+            journal.configuration["steps"] = steps
+
+            journal.configuration["type_statistics_calc_func"] = type(self.distance.statistics_calc).__name__
+
+
+        epsilon_1 = [1000]
+        epsilon_2 = [1000]
+
+        self.accepted_parameters_manager.broadcast(self.backend, observations)
 
 
         for aStep in range(steps):
-            # NOTE need epsilon calculation
-            # NOTE WE NEED TWO EPSILONS AND INSERT THE RIGHT ONE IN THE RIGHT PLACES
-            # NOTE need calculate weight implementation
+            if journal_file is not None:
+                accepted_parameters = journal.parameters
+                accepted_weights = journal.weights
+
+            # TODO STRATIFIED RESAMPLING ACCORDING TO PAPER
 
             # If we are at the first step, we want to only sample A different parameters
             if aStep is 0:
@@ -2755,6 +2853,7 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
                 index_arr = np.arange(n_samples_accepted)
                 rng_and_index_arr = np.column_stack((rng_arr, index_arr))
                 rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
+
             # Otherwise we want N
             else:
                 seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_total, dtype=np.uint32)
@@ -2763,11 +2862,8 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
                 rng_and_index_arr = np.column_stack((rng_arr, index_arr))
                 rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
 
-            # print("INFO: Broadcasting parameters.")
-            self.epsilon = epsilon
-
             # Calculate new parameters
-            parameters_and_ysim_and_counter_pds = self.backend.map(self.accept_parameters, rng_and_index_pds)
+            parameters_and_ysim_and_counter_pds = self.backend.map(self.perturb_parameters, rng_and_index_pds)
             parameters_and_ysim_and_counter = self.backend.collect(parameters_and_ysim_and_counter_pds)
             accepted_parameters, accepted_y_sim, accepted_y_sim_cheap,counter = [list(t) for t in zip(*parameters_and_ysim_and_counter)]
 
@@ -2803,12 +2899,50 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
 
                 new_weights = new_weights / sum(new_weights)
 
-            # TODO bisection for e2
+            accepted_weights = new_weights
+
+            self._update_broadcasts(accepted_parameters_tmp=accepted_parameters)
+
+            # NOTE CHOOSE E2 BY BISECTION ST N_SAMPLE UNIQUE PARTICLES REMAIN AFTER REWEIGHTING AND RESAMPLING
+
+            # TODO bisection for E1, not quite sure how to implement
+
+            seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_accepted, dtype=np.uint32)
+            rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
+            index_arr = np.arange(n_samples_total)
+            rng_and_index_arr = np.column_stack((rng_arr, index_arr))
+            rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
+
+            accepted_parameters_pds = self.backend.map(self.accept_parameters_second, rng_and_index_pds)
+
+            accepted_parameters = self.backend.collect(accepted_parameters_pds)
+
+            self.accepted_parameters_manager_model.update_broadcast(accepted_parameters=accepted_parameters)
+
+            if(aStep==steps-1 or full_output==1):
+                journal.parameters.append(accepted_parameters)
+                journal.weights.append(accepted_weights)
+
+        journal.configuration["epsilon_1"] = epsilon_1
+        journal.configuration["epsilon_2"] = epsilon_2
+
+        return journal
 
 
+    def perturb_parameters(self, rng_and_index):
+        """
+        Perturbs parameters and simulates data sets.
 
+        Parameters
+        ----------
+        rng_and_index: list
+            The rng and index to be used.
 
-    def accept_parameters(self, rng_and_index):
+        Returns
+        -------
+        tupel
+            The parameters, simulated data set, cheap simulated data set and the simulation counter.
+        """
         rng = rng_and_index[0]
         index = rng_and_index[1]
 
@@ -2867,7 +3001,49 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
 
         return (self.get_parameters(), y_sim, y_sim_cheap,counter)
 
-    def _calculate_weight(self):
+
+    def accept_parameters_second(self, rng_and_index):
+        """
+        Performs the second acceptance step.
+
+        Parameters
+        ----------
+        rng_and_index: list
+            The rng and index to be used.
+
+        Returns
+        -------
+        np.ndarray
+            The accepted parameters.
+        """
+        rng = rng_and_index[0]
+        index = rng_and_index[1]
+
+        self.model.set_parameters(self.accepted_parameters_tmp_bds.value()[index])
+        y_sim_tmp = self.simulate(rng=rng)
+
+        if(self.distance(self.accepted_parameters_manager.observations_bds.value(), self.accepted_y_sim_cheap_bds.value()[index])<self.epsilon_2):
+            theta = self.accepted_parameters_tmp_bds.value()[index]
+
+        else:
+            theta = self.accepted_parameters_manager.accepted_parameters_bds.value()[index]
+
+        return theta
+
+
+
+    def _bisection(self, func, low, high, tol):
+        midpoint = (low + high) / 2.0
+        while (high - low) / 2.0 > tol:
+            if func(midpoint) == 0:
+                return midpoint
+            elif func(low) * func(midpoint) < 0:
+                high = midpoint
+            else:
+                low = midpoint
+            midpoint = (low + high) / 2.0
+
+        return midpoint
 
 
 
