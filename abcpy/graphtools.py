@@ -360,7 +360,7 @@ class GraphTools():
 
         return ordered_parameters
 
-    def simulate(self, rng=np.random.RandomState()):
+    def simulate(self, models=None,rng=np.random.RandomState()):
         """Simulates data of each model using the currently sampled or perturbed parameters.
 
         Parameters
@@ -373,8 +373,11 @@ class GraphTools():
         list
             Each entry corresponds to the simulated data of one model.
         """
+        if(models is None):
+            models = self.model
+
         result = []
-        for model in self.model:
+        for model in models:
             simulation_result = model.sample_from_distribution(self.n_samples_per_param, rng=rng)
             if(simulation_result[0]):
                 result.append(simulation_result[1].tolist())

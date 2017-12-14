@@ -855,7 +855,7 @@ class PMC(BaseLikelihood, InferenceMethod):
 
         # Simulate the fake data from the model given the parameter value theta
         # print("DEBUG: Simulate model for parameter " + str(theta))
-        all_y_sim = self.simulate(self.rng)
+        all_y_sim = self.simulate(rng=self.rng)
         # print("DEBUG: Extracting observation.")
         all_obs = self.accepted_parameters_manager.observations_bds.value()
         # print("DEBUG: Computing likelihood...")
@@ -2731,31 +2731,80 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         self.epsilon_2 = None
 
 
-    def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, full_output=0):
+    def sample(self, observations, steps, n_samples=10000, n_samples_per_param=1, n_samples_total = 20000, n_samples_accepted = 10000, epsilon_1_final = 0.1, epsilon_2_final = 0.1, full_output=0):
+
+        # Set parameters for the inference
         self.n_samples = n_samples
         self.n_samples_per_param = n_samples_per_param
 
         self.n_samples_total = n_samples_total
         self.n_samples_accepted = n_samples_accepted
 
-        #NOTE EACH NODE WILL SAMPLE INDIVIDUALLY FROM PRIOR -> DO THE SAMPLING IN THE ACCEPT_PARAMETERS!
 
 
         for aStep in range(steps):
             # NOTE need epsilon calculation
-
+            # NOTE WE NEED TWO EPSILONS AND INSERT THE RIGHT ONE IN THE RIGHT PLACES
             # NOTE need calculate weight implementation
 
-            seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_total, dtype=np.uint32)
-            rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
-            index_arr = np.arange(n_samples_total)
-            rng_and_index_arr = np.column_stack((rng_arr, index_arr))
-            rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
+            # If we are at the first step, we want to only sample A different parameters
+            if aStep is 0:
+                seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_accepted,
+                                            dtype=np.uint32)  # reapeat N/A times!
+                rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
+                index_arr = np.arange(n_samples_accepted)
+                rng_and_index_arr = np.column_stack((rng_arr, index_arr))
+                rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
+            # Otherwise we want N
+            else:
+                seed_arr = self.rng.randint(0, np.iinfo(np.uint32).max, size=n_samples_total, dtype=np.uint32)
+                rng_arr = np.array([np.random.RandomState(seed) for seed in seed_arr])
+                index_arr = np.arange(n_samples_total)
+                rng_and_index_arr = np.column_stack((rng_arr, index_arr))
+                rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
 
             # print("INFO: Broadcasting parameters.")
             self.epsilon = epsilon
-            # NOTE THIS DOES THE WRONG THING: AT THE 0TH STEP, WE ONLY WANT TO GENERATE A DATA POINTS, BUT NOW WE HAVE N_TOT, WHICH IS N, WHICH WE DO NOT WANT!!
-            return_value = self.backend.map(self.accept_parameters, rng_and_index_pds)
+
+            # Calculate new parameters
+            parameters_and_ysim_and_counter_pds = self.backend.map(self.accept_parameters, rng_and_index_pds)
+            parameters_and_ysim_and_counter = self.backend.collect(parameters_and_ysim_and_counter_pds)
+            accepted_parameters, accepted_y_sim, accepted_y_sim_cheap,counter = [list(t) for t in zip(*parameters_and_ysim_and_counter)]
+
+            # If we are at the first step, we need to repeat the A parameters N/A times
+            if aStep is 0:
+                params = accepted_parameters
+                y_sim_tmp = accepted_y_sim
+                y_sim_cheap_tmp = accepted_y_sim_cheap
+                for i in range(1,n_samples_total/n_samples_accepted):
+                    accepted_parameters = np.concatenate((accepted_parameters, params))
+                    accepted_y_sim = np.concatenate((accepted_y_sim, y_sim_tmp))
+                    accepted_y_sim_cheap = np.concatenate((accepted_y_sim_cheap, y_sim_cheap_tmp))
+
+            # Calculate weights, depending on whether we are at the first step or not
+            if aStep is 0:
+                new_weights = np.ones(shape=(n_samples_total),)*(1./n_samples_total)
+
+            else:
+                new_weights = np.zeros(shape=(n_samples_total), )
+                for ind1 in range(n_samples_total):
+                    numerator = 0.0
+                    denominator = 0.0
+                    for ind2 in range(n_samples_per_param):
+                        numerator += (
+                            self.distance.distance(observations, [[accepted_y_sim_cheap[ind1][0][ind2]]]) < epsilon[-1])
+                        denominator += (
+                            self.distance.distance(observations, [[accepted_y_sim_cheap[ind1][0][ind2]]]) < epsilon[
+                                -2])
+                    if denominator != 0.0:
+                        new_weights[ind1] = accepted_weights[ind1] * (numerator / denominator)
+                    else:
+                        new_weights[ind1] = 0
+
+                new_weights = new_weights / sum(new_weights)
+
+            # TODO bisection for e2
+
 
 
 
@@ -2763,11 +2812,63 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         rng = rng_and_index[0]
         index = rng_and_index[1]
 
+        counter = 0
+
+        mapping_for_kernels, garbage_index = self.accepted_parameters_manager.get_mapping(
+            self.accepted_parameters_manager.model)
+
+        # If we are at the first step, accepted_parameters_bds is None
         if self.accepted_parameters_manager_model.accepted_parameters_bds is None:
+            # We need to sample from both priors
             self.sample_from_prior(model=self.model, rng=rng)
             self.sample_from_prior(model=self.cheap_model, rng=rng)
 
-            # NOTE DO WE NEED SIMULATED DATA FOR EACH MODEL??
+            # Simulate two data sets
+            y_sim = self.simulate(models = self.model, rng=rng)
+            counter+=1
+
+            y_sim_cheap = self.simulate(models=self.cheap_model, rng=rng)
+
+        else:
+            if self.accepted_parameters_manager.accepted_weights_bds.value()[index] > 0:
+                theta = self.accepted_parameters_manager.accepted_parameters_bds.value()[index]
+                # Perturb the parameters using the defined kernel
+                while True:
+                    perturbation_output = self.perturb(index, rng=rng)
+                    # Accept the parameters if they work with the model and can come from the prior
+                    if perturbation_output[0] and self.pdf_of_prior(self.model, perturbation_output[1]) != 0:
+                        break
+
+                # Calculate the acceptance probability
+                ratio_prior_prob = self.pdf_of_prior(self.model, perturbation_output[1]) / self.pdf_of_prior(self.model, theta)
+                kernel_numerator = self.kernel.pdf(mapping_for_kernels, self.accepted_parameters_manager, index, theta)
+                kernel_denominator = self.kernel.pdf(mapping_for_kernels, self.accepted_parameters_manager, index, perturbation_output[1])
+                ratio_likelihood_prob = kernel_numerator / kernel_denominator
+                acceptance_prob = min(1, ratio_prior_prob * ratio_likelihood_prob)
+
+                if rng.binomial(1, acceptance_prob) == 1:
+                    self.set_parameters(perturbation_output[1])
+                    y_sim = self.simulate(rng=rng)
+                    counter+=1
+
+                    y_sim_cheap = self.simulate(models=self.cheap_model, rng=rng)
+
+                else:
+                    self.set_parameters(theta)
+                    y_sim = self.accepted_y_sim_bds.value()[index]
+
+                    y_sim_cheap = self.accepted_y_sim_cheap_bds.value()[index]
+
+            else:
+                self.set_parameters(self.accepted_parameters_manager.accepted_parameters_bds.value()[index])
+                y_sim = self.accepted_y_sim_bds.value()[index]
+
+                y_sim_cheap = self.accepted_y_sim_cheap_bds.value()[index]
+
+        return (self.get_parameters(), y_sim, y_sim_cheap,counter)
+
+    def _calculate_weight(self):
+
 
 
 
