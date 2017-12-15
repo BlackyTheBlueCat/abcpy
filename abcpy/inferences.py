@@ -70,6 +70,12 @@ class BaseMethodsWithKernel(metaclass = ABCMeta):
     """
 
     @abstractproperty
+    def accepted_parameters_manager(self):
+        """To be overwritten by any sub-class: an attribute specifying the accepted parameters manager to be used by the salmpler.
+        """
+        raise NotImplementedError
+
+    @abstractproperty
     def kernel(self):
         """To be overwritten by any sub-class: an attribute specifying the transition or perturbation kernel."""
         raise NotImplementedError
@@ -300,6 +306,8 @@ class PMCABC(BaseDiscrepancy, InferenceMethod):
     distance = None
     kernel = None
     rng = None
+
+    accepted_parameters_manager = None
 
     #default value, set so that testing works
     n_samples = 2
@@ -613,6 +621,7 @@ class PMC(BaseLikelihood, InferenceMethod):
 
     backend = None
 
+    accepted_parameters_manager = None
 
     def __init__(self, root_models, likfun, backend, kernel=None, seed=None):
         self.model = root_models
@@ -940,6 +949,8 @@ class SABC(BaseDiscrepancy, InferenceMethod):
     all_distances_bds = None
 
     backend = None
+
+    accepted_parameters_manager = None
 
     def __init__(self, root_models, distance, backend, kernel=None, seed=None):
         self.model = root_models
@@ -1385,6 +1396,8 @@ class ABCsubsim(BaseDiscrepancy, InferenceMethod):
 
     backend = None
 
+    accepted_parameters_manager = None
+
     def __init__(self, root_models, distance, backend, kernel=None,seed=None):
         self.model = root_models
         self.distance = distance
@@ -1749,6 +1762,8 @@ class RSMCABC(BaseDiscrepancy, InferenceMethod):
 
     backend = None
 
+    accepted_parameters_manager = None
+
 
     def __init__(self, root_models, distance, backend, kernel=None,seed=None):
         self.model = root_models
@@ -2055,6 +2070,8 @@ class APMCABC(BaseDiscrepancy, InferenceMethod):
 
     backend = None
 
+    accepted_parameters_manager = None
+
     def __init__(self,  root_models, distance, backend, kernel = None,seed=None):
         self.model = root_models
         self.distance = distance
@@ -2344,6 +2361,8 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
     accepted_y_sim_bds = None
 
     backend = None
+
+    accepted_parameters_manager = None
 
     def __init__(self, root_models, distance, backend, kernel = None,seed=None):
         self.model = root_models
@@ -2705,6 +2724,27 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
 # TODO do we also want to count the simulations from the cheap simulator?
 
 class DASMCABC(BaseDiscrepancy, InferenceMethod):
+    """This class implements Delayed Acceptance Adaptive Population Monte Carlo Approximate Bayesian computation by Everitt and Rowinska [1].
+
+    [1] R. G. Everitt and P. A. Rowinska, Delayed Acceptance ABC-SMC, arXiv, 2017.
+    """
+
+    model = None
+    cheap_model = None
+    distance = None
+    backend = None
+
+    accepted_parameters_manager = None
+    kernel = None
+    rng = None
+
+    epsilon_1 = None
+    epsilon_2 = None
+
+    accepted_y_sim_bds = None
+    accepted_y_sim_cheap_bds = None
+    accepted_parameters_tmp_bds = None
+
     def __init__(self, model, cheap_simulator_model, distance, backend, kernel=None, seed=None):
         """
 
@@ -2930,6 +2970,9 @@ class DASMCABC(BaseDiscrepancy, InferenceMethod):
             if(aStep==steps-1 or full_output==1):
                 journal.parameters.append(accepted_parameters)
                 journal.weights.append(accepted_weights)
+
+                names_and_parameters = self.get_names_and_parameters()
+                journal.add_user_parameters(names_and_parameters)
                 journal.number_of_simulations.append(self.simulation_counter)
 
         journal.configuration["epsilon_1"] = epsilon_1
