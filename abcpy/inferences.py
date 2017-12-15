@@ -2701,9 +2701,10 @@ class SMCABC(BaseDiscrepancy, InferenceMethod):
 # TODO Weight calculation that uses kernels
 # TODO stratified resampling
 # TODO  updating of epsilon_1 and epsilon_2
-# TODO finish loading from journal file
+# TODO finish loading from journal file, depending on what else is needed from it
+# TODO do we also want to count the simulations from the cheap simulator?
 
-class DAABCSMC(BaseDiscrepancy, InferenceMethod):
+class DASMCABC(BaseDiscrepancy, InferenceMethod):
     def __init__(self, model, cheap_simulator_model, distance, backend, kernel=None, seed=None):
         """
 
@@ -2816,6 +2817,8 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         self.n_samples_total = n_samples_total
         self.n_samples_accepted = n_samples_accepted
 
+        self.simulation_counter = 0
+
         if(journal_file is not None):
             journal = Journal.fromFile(journal_file)
         else:
@@ -2866,7 +2869,10 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
             # Calculate new parameters
             parameters_and_ysim_and_counter_pds = self.backend.map(self.perturb_parameters, rng_and_index_pds)
             parameters_and_ysim_and_counter = self.backend.collect(parameters_and_ysim_and_counter_pds)
-            accepted_parameters, accepted_y_sim, accepted_y_sim_cheap,counter = [list(t) for t in zip(*parameters_and_ysim_and_counter)]
+            accepted_parameters, accepted_y_sim, accepted_y_sim_cheap, counter = [list(t) for t in zip(*parameters_and_ysim_and_counter)]
+
+            for count in counter:
+                self.simulation_counter+=count
 
             # If we are at the first step, we need to repeat the A parameters N/A times
             if aStep is 0:
@@ -2878,6 +2884,7 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
                     accepted_y_sim = np.concatenate((accepted_y_sim, y_sim_tmp))
                     accepted_y_sim_cheap = np.concatenate((accepted_y_sim_cheap, y_sim_cheap_tmp))
 
+            # NOTE not sure which epsilon to use
             # Calculate weights, depending on whether we are at the first step or not
             if aStep is 0:
                 new_weights = np.ones(shape=(n_samples_total),)*(1./n_samples_total)
@@ -2910,15 +2917,20 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
             rng_and_index_arr = np.column_stack((rng_arr, index_arr))
             rng_and_index_pds = self.backend.parallelize(rng_and_index_arr)
 
-            accepted_parameters_pds = self.backend.map(self.accept_parameters_second, rng_and_index_pds)
+            accepted_parameters_and_counter_pds = self.backend.map(self.accept_parameters_second, rng_and_index_pds)
 
-            accepted_parameters = self.backend.collect(accepted_parameters_pds)
+            accepted_parameters_and_counter = self.backend.collect(accepted_parameters_and_counter_pds)
+
+            accepted_parameters, counter = [list(t) for t in zip(*accepted_parameters_and_counter)]
+
+            self.simulation_counter+=len(counter)
 
             self.accepted_parameters_manager_model.update_broadcast(accepted_parameters=accepted_parameters)
 
             if(aStep==steps-1 or full_output==1):
                 journal.parameters.append(accepted_parameters)
                 journal.weights.append(accepted_weights)
+                journal.number_of_simulations.append(self.simulation_counter)
 
         journal.configuration["epsilon_1"] = epsilon_1
         journal.configuration["epsilon_2"] = epsilon_2
@@ -3010,8 +3022,8 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
 
         Returns
         -------
-        np.ndarray
-            The accepted parameters.
+        tupel
+            The first entry is the accepted parameters after the second acceptance step. The second entry is the umber of simulations.
         """
         rng = rng_and_index[0]
         index = rng_and_index[1]
@@ -3025,7 +3037,7 @@ class DAABCSMC(BaseDiscrepancy, InferenceMethod):
         else:
             theta = self.accepted_parameters_manager.accepted_parameters_bds.value()[index]
 
-        return theta
+        return theta, 1
 
 
 
